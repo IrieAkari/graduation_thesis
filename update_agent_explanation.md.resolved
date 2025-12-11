@@ -1,0 +1,91 @@
+# エージェント更新ロジックの解説 (`update_agent`)
+
+この関数は、1タイムステップにおけるエージェントの認知サイクル（知覚→推論→計画→行動→学習）を実行します。
+特に `pymdp` の標準関数とは異なる、このタスク独自のカスタマイズや詳細な情報取得が行われている点に注目して解説します。
+
+## 1. 状態推論 ([infer_states_vfe](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#504-564))
+
+標準的な [infer_states](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#323-374) との違いについて解説します。
+
+```python
+beliefs, _, vfe, kld, bs, un = agents.infer_states_vfe(outcomes, ...)
+```
+
+### 標準の [infer_states](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#323-374) (agent.py)
+*   **目的**: 変分推論を用いて、観測から隠れ状態の事後分布 [qs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#954-956) を更新する。
+*   **戻り値**: [qs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#954-956) (更新された信念) のみ。
+
+### 今回使用している [infer_states_vfe](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#504-564) (agent.py に追加実装されている模様)
+*   **目的**: 推論を行うだけでなく、**その過程の指標（VFEなど）を詳細に計算して返す**。
+*   **戻り値**:
+    *   [qs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#954-956): 信念
+    *   [vfe](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#504-564): **変分自由エネルギー (Variational Free Energy)**。推論の「驚き」や「複雑さ」を表すコスト関数。これが低いほど良いモデル/推論と言える。
+    *   `kld`: 事前分布と事後分布の距離 (KL Divergence)。信念の更新量。
+    *   [bs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#189-201): Bayesian Surprise?
+    *   [un](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#1376-1404): Uncertainty?
+*   **なぜ違う？**: 研究や分析のために、単に推論するだけでなく「エージェントがどれくらい驚いているか」「どれくらい信念を変えたか」を定量評価したいため、専用のラッパー関数が用意されています。
+
+---
+
+## 2. 方策推論 ([infer_policies_detail](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#1011-1055))
+
+標準的な [infer_policies](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#389-430) との違いについて解説します。
+
+```python
+q_pi, neg_efe, G_info = agents.infer_policies_detail(beliefs, alpha=alpha)
+```
+
+### 標準の [infer_policies](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#389-430) (control.py / agent.py)
+*   **目的**: 各方策の**期待自由エネルギー (EFE)** を計算し、ソフトマックス関数で方策の確率分布 `q_pi` を求める。
+*   **計算式**: $P(\pi) = \sigma(-\gamma \cdot G(\pi))$
+*   **戻り値**: `q_pi` (方策分布), `neg_efe` (負のEFE)
+
+### 今回使用している [infer_policies_detail](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#1011-1055) (control.py 内の [compute_G_policy_inductive_detail](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#699-739) などを利用)
+*   **目的**: EFEを単一のスカラ値として計算するだけでなく、その**内訳（構成要素）を分解して返す**。
+*   **EFEの分解**:
+    *   **Utility (実用価値)**: ゴールに近づく度合い（C行列との一致）。
+    *   **State Info Gain (認識的価値)**: 状態について新しい情報を得られる度合い（探索）。
+    *   **Parameter Info Gain**: パラメータ（モデルpA, pB）の学習が進む度合い。
+    *   **Inductive Value**: 帰納的な価値（将来のゴール到達可能性？）。
+*   **[alpha](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#985-1003) 引数**: [infer_policies_detail](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#1011-1055) には [alpha](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#985-1003) (注意の重み) を渡しています。これにより、方策評価時にも「自分重視/相手重視」の重み付けを反映させてEFEを計算しています。
+*   **戻り値 `G_info`**: 上記の内訳が辞書形式で返されます。これにより、「なぜその行動を選んだのか（ゴール優先か、探索優先か）」を分析できます。
+
+---
+
+## 3. 全体のフロー解説
+
+1.  **知覚 & 状態推論**:
+    ```python
+    infer_states_vfe(outcomes, ...)
+    ```
+    観測を受け取り、VFEを最小化するように現在の信念を更新します。
+
+2.  **計画 (方策推論)**:
+    ```python
+    infer_policies_detail(beliefs, alpha=alpha)
+    ```
+    更新された信念を元に、未来の行動計画をEFEに基づいて評価します。EFEの内訳も同時に取得します。
+
+3.  **行動選択**:
+    ```python
+    sample_action(q_pi, ...)
+    ```
+    計算された方策分布から、次の行動をサンプリングします。
+
+4.  **履歴管理**:
+    ```python
+    outcomes = ...[:, -num_history:]
+    ```
+    計算量を抑えるため、保持する履歴を最新の `num_history` ステップ分に制限します。
+
+5.  **学習 (Learning)**:
+    ```python
+    infer_parameters(...)
+    ```
+    直近の経験（信念、行動、観測）に基づいて、モデルパラメータ [pA](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#230-262), [pB](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#263-290) を更新します。これによりエージェントは環境や相手の振る舞いを学習していきます。
+
+---
+
+**結論**:
+`update_agent` 内で使われている [_vfe](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#504-564) や [_detail](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#1011-1055) 接尾辞のつく関数は、通常のActive Inferenceのループを実行しつつ、**研究分析用に詳細な内部指標（VFEの内訳、EFEの構成要素など）を出力・記録できるように拡張された関数**です。
+pymdpの標準ライブラリをラップまたは拡張して実装されています。

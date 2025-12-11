@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.ipynb_checkpoints/
+
+# Unity
+/[Ee]xperiment/**/[Ll]ibrary/
+/[Ee]xperiment/**/[Tt]emp/
+/[Ee]xperiment/**/[Oo]bj/
+/[Ee]xperiment/**/[Bb]uild/
+/[Ee]xperiment/**/[Bb]uilds/
+/[Ee]xperiment/**/[Ll]ogs/
+/[Ee]xperiment/**/[Uu]ser[Ss]ettings/
+/[Ee]xperiment/**/[Mm]emoryCaptures/
+/[Ee]xperiment/**/*.csproj
+/[Ee]xperiment/**/*.sln
+/[Ee]xperiment/**/*.pidb.meta
+/[Ee]xperiment/**/*.unityproj
+/[Ee]xperiment/**/*.suo
+/[Ee]xperiment/**/*.user
+/[Ee]xperiment/**/*.userprefs
+/[Ee]xperiment/**/*.pidb
+/[Ee]xperiment/**/*.booproj
+/[Ee]xperiment/**/*.svd
+/[Ee]xperiment/**/*.pdb
+/[Ee]xperiment/**/*.mdb
+/[Ee]xperiment/**/*.opendb
+/[Ee]xperiment/**/*.VC.db
+
+# MATLAB
+*.asv
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Simulation Outputs
+*.pickle
+*.csv
+
+# Large Files
+Experiment/第5章_人と生成モデルに基づいて行動するロボットのすれ違いの実証実験/program/Unity/Fonts/NotoSansJP-Black SDF.asset

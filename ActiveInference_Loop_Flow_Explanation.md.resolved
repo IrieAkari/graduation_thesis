@@ -1,0 +1,109 @@
+# 能動的推論 (Active Inference) ループ詳細フロー解説
+
+このコードにおける1タイムステップ（`T`）ごとの処理の流れを、データの入出力に着目して詳細にリバースエンジニアリングしました。
+
+```mermaid
+graph TD
+    subgraph Environment [環境 (Simulation Loop)]
+        A_Prev[前回の行動 actions_t] --> |移動処理| State_Update[座標更新 agent_x, agent_y]
+        State_Update --> |One-hot化 & 距離計算| Obs_Gen[観測生成 obs]
+    end
+
+    subgraph Agent [エージェント (update_agent)]
+        Obs_Gen --> |outcomes| Perc[1. 知覚: 状態推論\n infer_states_vfe]
+        Perc --> |beliefs (qs)| Plan[2. 計画: 方策推論\n infer_policies_detail]
+        Plan --> |q_pi| ActionSel[3. 行動選択: サンプリング\n sample_action]
+        ActionSel --> |next_action| Learn[4. 学習: パラメータ更新\n infer_parameters]
+    end
+
+    ActionSel --> |actions| A_Prev
+    
+    style Environment fill:#f9f,stroke:#333
+    style Agent fill:#ccf,stroke:#333
+```
+
+---
+
+## 1. 環境側: 行動から観測へ (Environment Interaction)
+
+ここでの「環境」は物理シミュレータ部分です。
+
+### 1-1. 物理的な状態更新
+*   **入力**: `actions_t` (前ステップでエージェントが決めた行動インデックス)
+*   **処理**:
+    ```python
+    agent_x[i] = max(0, min(x_division-1, agent_x[i]+actions_t[i][0]-1))
+    ```
+    現在座標に `+1` (正方向), `0` (静止), `-1` (負方向) を加算して位置を更新します。
+*   **出力**: 新しい `agent_x`, `agent_y`
+
+### 1-2. 観測信号の生成 ([obs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#189-201))
+エージェントは座標そのものではなく、One-hotベクトルや計算された値を見ます。
+*   **入力**: `agent_x`, `agent_y`
+*   **処理**:
+    1.  **位置情報**: 座標を `nn.one_hot` でベクトル化。
+    2.  **自己受容 (Proprioception)**: 自分の直前の行動 (`actions_t`) も観測として入る。
+    3.  **衝突距離**: `np.sqrt` で距離を計算し、離散化して One-hot 化。
+*   **出力**: [obs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#189-201) (9つのモダリティを持つリスト)
+    ```python
+    # 例: Agent0の観測
+    obs = [自X(One-hot), 自Y, 自ActX, 自ActY, 相手X, 相手Y, 他ActX, 他ActY, 距離]
+    ```
+
+---
+
+## 2. エージェント側: `update_agent` の内部処理
+
+ここで `update_agent(...)` が呼ばれます。
+
+### 2-1. 知覚・状態推論 ([infer_states_vfe](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#504-564))
+「今、世界はどうなっているか？」を推論します。
+
+*   **入力**: `outcomes` (今の観測 [obs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#189-201)), `infer_args` (前回の信念 [qs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#954-956) や事前分布 `D`)
+*   **処理**:
+    *   **変分推論 (Variational Inference)**: 観測 `o` と生成モデル（`A`行列）を使って、隠れ状態 `s` の事後分布 [qs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#954-956) を計算します。
+    *   計算式イメージ: $P(s|o) \propto P(o|s)P(s)$ (ベイズ更新の近似)
+*   **出力**:
+    *   `beliefs` ([qs](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#954-956)): 「自分はどこにいて、相手はどこにいるか」の確率分布。
+    *   [vfe](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#504-564) (変分自由エネルギー): この推論がどれくらい「意外」だったか（予測誤差に近い）。
+
+### 2-2. 計画・方策推論 ([infer_policies_detail](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#1011-1055))
+「これからどう動けばゴール（C行列）に近づけるか？」を考えます。
+
+*   **入力**: `beliefs` (現在の状態), `C`行列 (選好/ゴール), `Alpha` (注意の重み)
+*   **処理**:
+    *   あらかじめ定義された **Policy (行動手順の候補)** ごとに **G (期待自由エネルギー, EFE)** を計算します。
+    *   **G の計算内容**:
+        1.  **Utility (実用価値)**: ゴール `C` にどれだけ近づけるか。
+        2.  **Information Gain (認識的価値)**: 不確実性をどれだけ減らせるか。
+    *   $P(\pi) = \sigma(-\gamma \cdot G)$ で確率分布に変換。
+*   **出力**:
+    *   `q_pi`: 「どのPolicyを採用すべきか」の確率分布。(例: `[0.8, 0.2]` なら80%でPolicy 0を選ぶ)
+    *   `G_info`: Gの内訳（UtilityやInfoGainの値）。分析用。
+
+### 2-3. 行動選択 ([sample_action](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#49-87))
+「考えた結果、実際に動く」段階です。
+
+*   **入力**: `q_pi` (方策の確率分布)
+*   **処理**:
+    *   確率分布に従って、ランダムに1つの Policy を選択（サンプリング）。
+    *   その Policy の「次の1手」を取り出す。
+*   **出力**: `next_action` (具体的な行動インデックス。例: `[1, 2, ...]` → Xは右、Yは左)
+
+### 2-4. 学習 ([infer_parameters](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#260-322))
+「経験から世界モデルを修正する」段階です。
+
+*   **入力**: `outcomes` (観測), `beliefs` (推論結果), [actions](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#255-259) (行った行動)
+*   **処理**:
+    *   **Hezzian Learning**: 「Xという状態で行動Yをしたら、Zになった」という経験をカウントし、[pB](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#263-290) (遷移モデル) を更新します。
+    *   同様に「状態X'のとき観測O'が得られた」経験で [pA](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#230-262) を更新します。
+*   **出力**: 更新された `agents` オブジェクト（内部の [pA](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#230-262), [pB](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/control.py#263-290) が変化している）。
+
+---
+
+## 3. 次のステップへ (Closing the Loop)
+
+*   `update_agent` から返ってきた `next_action` が、メインループの [actions](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#255-259) リストに追加されます。
+*   次のループの冒頭で、この [actions](file:///Users/akari.irie/Library/CloudStorage/OneDrive-TheUniversityofTokyo/lab/py_venvs/graduation_thesis/pymdp/pymdp/jax/agent.py#255-259) が `actions_t` として使われ、再び **1-1. 物理的な状態更新** に入力されます。
+
+このサイクルを `T=0` から `T=49` まで繰り返すことで、エージェントは「動く→見る→考える→また動く」というループを回し続け、ゴールを目指します。
